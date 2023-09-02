@@ -6,7 +6,9 @@
 #include <pthread.h>
 #include <limits.h>
 
-#define NUM_ASCENSORES 3 //Cantidad de ascensores constante
+//######################### SECCION ESTRUCTURAS ############################
+
+#define NUM_ASCENSORES 2 //Cantidad de ascensores constante
 
 typedef struct { //Estructura que define un pasajero
     int origen;
@@ -40,6 +42,11 @@ char *seg_asc = "2";
 char *pisos;
 bool salida_bool = true;
 int fd[2]; // Array para almacenar los descriptores de la tubería de mensaje
+pthread_mutex_t p_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+//###########################################################################
+
+//######################### SECCION INICIALIZADORES ############################
 
 void iniciar_escritor(){
     pid_t pid;
@@ -64,7 +71,7 @@ void iniciar_escritor(){
 
         while ((bytes_leidos = read(fd[0], mensaje, sizeof(mensaje))) > 0) {
             mensaje[bytes_leidos] = '\0'; // Añadimos un terminador nulo al final
-            printf("\033[H\033[J");
+            system("clear");
             printf("%s\n", mensaje);
         }
 
@@ -87,6 +94,10 @@ void inicializar_ascensores(int capacidad_ascensor){ //Inicializacion de ascenso
     }
 }
 
+//#####################################################################
+
+//##################### SECCION HILO LECTURA ##########################
+
 void cargar_pasajero(Ascensor *ascensor, Pasajero *pasajero){ //Metodo para cargar un pasajero a un ascensor
     if(ascensor->cantPasajeros < ascensor->capacidad){
         ascensor->cantPasajeros++; 
@@ -95,7 +106,6 @@ void cargar_pasajero(Ascensor *ascensor, Pasajero *pasajero){ //Metodo para carg
 }
 
 void ubicar_ascensor(Pasajero *pasajero){ //Metodo para ubicar el mejor ascensor a un pasajero
-    char mensaje[1024] = "";
     int ascensor_elegido = -1;
     int tiempo_minimo = INT_MAX;
 
@@ -117,18 +127,58 @@ void ubicar_ascensor(Pasajero *pasajero){ //Metodo para ubicar el mejor ascensor
 
     if(ascensor_elegido != -1){ //Cargar pasajero al ascensor
         pthread_mutex_lock(&ascensores[ascensor_elegido].mutex);
-        char piso_m[70] = "";
-        for(int i=0;i<atoi(pisos);i++){
-            sprintf(piso_m, "Piso %d: %d pasajeros esperando\n",i, *pasajeros_esperando);
-            strcat(mensaje,piso_m);
-            //write(fd[1],piso_m,strlen(piso_m));
-        }        
-        write(fd[1],mensaje,strlen(mensaje));
         cargar_pasajero(&ascensores[ascensor_elegido],pasajero);
         pthread_mutex_unlock(&ascensores[ascensor_elegido].mutex);    
     }
     
 }
+
+void *lecturaSensores(void *arg) { //Metodo que ejecuta el hilo de la lectura de los sensores
+    char mensaje[1024] = "";
+    int contador = 0;
+    while (1) {
+        FILE *archivo = fopen("npipe", "r");
+
+        if (archivo == NULL) {
+            perror("No se pudo abrir el archivo");
+            return NULL;
+        }
+        char linea[1024];
+        for(int i=0;i<contador;i++){
+            fgets(linea, sizeof(linea), archivo);
+        } 
+        while (fgets(linea, sizeof(linea), archivo) != NULL) {
+            int orig,dest;
+            if(sscanf(linea,"%d-%d\n",&orig,&dest)==2){
+                Pasajero pasajero;
+                pasajero.origen=orig;
+                pasajero.destino=dest;
+                ubicar_ascensor(&pasajero);
+                pthread_mutex_lock(&p_mutex);
+                pasajeros_esperando[pasajero.origen]++;
+                pthread_mutex_unlock(&p_mutex);
+                contador++;
+            }
+        }
+        fclose(archivo);
+        char piso_m[70] = "";
+        for(int i=0;i<atoi(pisos);i++){
+            sprintf(piso_m, "Piso %d: %d pasajeros esperando\n",i, *pasajeros_esperando);
+            strcat(mensaje,piso_m);
+        }        
+        write(fd[1],mensaje,strlen(mensaje));
+        sprintf(mensaje,"contador: %d\n",contador);
+        write(fd[1],mensaje,strlen(mensaje)); 
+        
+        sleep(1);       
+    }
+
+    return NULL;
+}
+
+//###############################################################
+
+//###################### SECCION HILO ASCENSOR ##################
 
 void mover_ascensor(Ascensor *ascensor) { //Metodo para mover el ascensor
     int cont_bajan = 0;
@@ -162,13 +212,15 @@ void mover_ascensor(Ascensor *ascensor) { //Metodo para mover el ascensor
             for (int j = i; j < ascensor->cantPasajeros; j++) {
                 ascensor->pasajeros[j] = ascensor->pasajeros[j + 1];
             }
+            pthread_mutex_lock(&p_mutex);
             pasajeros_esperando[ascensor->pisoActual]+= -1;
+            pthread_mutex_unlock(&p_mutex);
             i--; // Retroceder el índice para el próximo pasajero
             cont_bajan++;
         }
     }
     if(cont_bajan>0){
-        sprintf(mensaje,"Se bajaron %d pasajeros en el piso: %d\n",cont_bajan,ascensor->pisoActual);
+        sprintf(mensaje,"Ascensor %d - Se bajaron %d pasajeros en el piso: %d\n",ascensor->id,cont_bajan,ascensor->pisoActual);
     }    
     write(fd[1],mensaje,strlen(mensaje));
 
@@ -178,52 +230,32 @@ void mover_ascensor(Ascensor *ascensor) { //Metodo para mover el ascensor
 
 void *hiloAscensor(void *arg){ //Metodo que ejecuta el hilo de cada ascensor
     Ascensor* ascensor = (Ascensor*)arg;
+    char mensaje[100] = "";
+            
     while(1){
         if(ascensor->cantPasajeros>0){
+            sprintf(mensaje,"Pasajeros ascensor %d: %d\n",ascensor->id,ascensor->cantPasajeros);
+            write(fd[1],mensaje,strlen(mensaje));
             mover_ascensor(ascensor);        
         }
     }
 }
 
-void *lecturaSensores(void *arg) { //Metodo que ejecuta el hilo de la lectura de los sensores
-    int contador = 0;
-    while (1) {
-        FILE *archivo = fopen("npipe", "r");
+//################################################################
 
-        if (archivo == NULL) {
-            perror("No se pudo abrir el archivo");
-            return NULL;
-        }
-        char linea[1024];
-        for(int i=0;i<contador;i++){
-            fgets(linea, sizeof(linea), archivo);
-        }
-        while (fgets(linea, sizeof(linea), archivo) != NULL) {
-            int orig,dest;
-            if(sscanf(linea,"%d-%d\n",&orig,&dest)==2){
-                Pasajero pasajero;
-                pasajero.origen=orig;
-                pasajero.destino=dest;
-                ubicar_ascensor(&pasajero);
-                pasajeros_esperando[pasajero.origen]++;
-                contador++;
-            }
-        }
-        fclose(archivo);
-            
-        sleep(1); // Espera 1 segundo antes de volver a verificar        
-    }
-
-    return NULL;
-}
+// ###################### SECCION HILO PEDIDOS ###################
 
 void *pedidosAscensor(void *arg) { //Metodo que ejecuta el hilo de los pedidos de personas
     char **args = (char **)arg;
     
     execvp(args[0], args); 
-    perror("Error al ejecutar el programa");   
+    perror("Error al ejecutar el programa pedidos");   
     return NULL;
 }
+
+//###############################################################
+
+//####################### SECCION PRINCIPAL ####################
 
 int main(int argc, char *argv[]) { //Metodo principal
     pthread_t threads_ascensores[NUM_ASCENSORES]; //Hilos para los ascensores
@@ -259,9 +291,8 @@ int main(int argc, char *argv[]) { //Metodo principal
         perror("Error al crear el hilo de pedidos de personas");
         return 1;
     }
-    
-    if (pthread_create(&lectura, NULL, lecturaSensores, NULL) != 0) { //Se ejecuta el hilo de lectura de los sensores        
-        perror("Error al crear el hilo de lectura de sensor");
+    if (pthread_create(&lectura, NULL, lecturaSensores, NULL) != 0) { //Se ejecuta el hilo de peticiones de ascensor
+        perror("Error al crear el hilo de pedidos de personas");
         return 1;
     }
 
@@ -277,3 +308,5 @@ int main(int argc, char *argv[]) { //Metodo principal
 
     return 0;
 }
+
+//#######################################################################
